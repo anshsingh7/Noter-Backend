@@ -179,7 +179,7 @@ const loginUserWithFace = async (req, res) => {
     }
 
     // ✅ Check match percent
-    if (!pythonRes.data.match || pythonRes.data.matchPercent < 60) {
+      if (!pythonRes.data.match ) {
       return res.status(401).json({
         success: false,
         message: "Face did not match",
