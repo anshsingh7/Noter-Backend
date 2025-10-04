@@ -7,6 +7,7 @@ const {
   adminGetAllUserController,
   moderatorAllUsersController,
   loginUserWithFace,
+  updateUserRole,
 } = require("../controllers/authController");
 const { protect, authorizeRoles } = require("../middleware/authMiddleware");
 const upload = require("../utils/utilityFunction");
@@ -29,3 +30,11 @@ router.get("/admin/getAllUsers", protect, authorizeRoles("admin"), adminGetAllUs
 router.get("/moderator/getAllUsers", protect, authorizeRoles("moderator"), moderatorAllUsersController);
 
 module.exports = router;
+
+router.put(
+  "/updateUserRole/:id",
+  protect,
+  authorizeRoles("admin", "moderator"),
+  updateUserRole
+);
+

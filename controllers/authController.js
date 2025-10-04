@@ -1,6 +1,10 @@
 const User = require("../models/userModel");
 const axios = require("axios");
-const { generateToken, hashPassword, comparePassword } = require("../utils/utilityFunction");
+const {
+  generateToken,
+  hashPassword,
+  comparePassword,
+} = require("../utils/utilityFunction");
 
 // ✅ CURRENT USER
 const getCurrentUser = async (req, res) => {
@@ -67,13 +71,11 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    
-    
     const user = await User.findOne({ email }).select("+password");
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
-    
+
     const isMatch = await comparePassword(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid credentials" });
@@ -96,18 +98,18 @@ const loginUser = async (req, res) => {
   }
 };
 
-
 const updateFacePattern = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const pythonUrl = process.env.PYTHON_API_URL || "http://localhost:5000";
     const updatedUser = await User.findById(id);
 
     if (!updatedUser) {
-      return res.status(404).json({ success: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     }
-
 
     // Call Python backend
     const pythonRes = await axios.post(
@@ -119,16 +121,17 @@ const updateFacePattern = async (req, res) => {
     if (!pythonRes.data || !pythonRes.data.success) {
       return res.status(400).json({
         success: false,
-        message: (pythonRes.data && pythonRes.data.message) || "Python face capture failed",
+        message:
+          (pythonRes.data && pythonRes.data.message) ||
+          "Python face capture failed",
       });
     }
 
-    // ✅ Extract encoding
-    const encoding = pythonRes.data.encoding;
-    const finalEncoding = (encoding && encoding.length > 0) ? encoding : [];
+    // ✅ Extract nested encodings
+    const encodingsByPose = pythonRes.data.encodingsByPose;
 
-    // ✅ Update user in MongoDB
-    updatedUser.faceEncodedData = finalEncoding;
+    // ✅ Store all poses & embeddings
+    updatedUser.faceEncodedData = encodingsByPose;
     await updatedUser.save();
 
     return res.json({
@@ -139,9 +142,17 @@ const updateFacePattern = async (req, res) => {
   } catch (error) {
     console.error("updateFacePattern error:", error.message || error);
     if (error.response && error.response.data) {
-      return res.status(500).json({ success: false, message: "Python error", error: error.response.data });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message: "Python error",
+          error: error.response.data,
+        });
     }
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: error.message });
   }
 };
 
@@ -150,7 +161,9 @@ const loginUserWithFace = async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
-      return res.status(400).json({ message: "Email is required for face login" });
+      return res
+        .status(400)
+        .json({ message: "Email is required for face login" });
     }
 
     const user = await User.findOne({ email });
@@ -159,7 +172,9 @@ const loginUserWithFace = async (req, res) => {
     }
 
     if (!user.faceEncodedData || user.faceEncodedData.length === 0) {
-      return res.status(400).json({ message: "No face data registered for this user" });
+      return res
+        .status(400)
+        .json({ message: "No face data registered for this user" });
     }
 
     const pythonUrl = process.env.PYTHON_API_URL || "http://localhost:5000";
@@ -174,35 +189,45 @@ const loginUserWithFace = async (req, res) => {
     if (!pythonRes.data || !pythonRes.data.success) {
       return res.status(400).json({
         success: false,
-        message: (pythonRes.data && pythonRes.data.message) || "Face verification failed",
+        message:
+          (pythonRes.data && pythonRes.data.message) ||
+          "Face verification failed",
       });
     }
 
-    // ✅ Check match percent
-      if (!pythonRes.data.match ) {
-      return res.status(401).json({
-        success: false,
-        message: "Face did not match",
-        similarity: pythonRes.data.similarity,
-        matchPercent: pythonRes.data.matchPercent,
-      });
-    }
+   // ✅ Check match percent for multi-pose
+const isMatched =await pythonRes.data.overallMatch ?? false;
 
-    // ✅ If match → return same response as password login
-    return res.json({
-      success: true,
-      token: generateToken(user._id, user.role),
-      user: {
-        id: user.id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        role: user.role,
-        encoding: user.faceEncodedData || [],
-      },
-      similarity: pythonRes.data.similarity,
-      matchPercent: pythonRes.data.matchPercent,
-    });
+ console.log("Face did not matchk:", pythonRes.data);
+
+if (!isMatched) {
+  console.log("Face did not match:", pythonRes.data);
+  return res.status(401).json({
+    success: false,
+    message: "Face did not match",
+    similarity: pythonRes.data.similarity || null,
+    matchPercent: pythonRes.data.matchPercent || null,
+    perPose: pythonRes.data.perPose || null,
+  });
+}
+
+// ✅ If match → return same response as password login
+return res.json({
+  success: true,
+  token: generateToken(user._id, user.role),
+  user: {
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    role: user.role,
+    encoding: user.faceEncodedData || [],
+  },
+  similarity: pythonRes.data.similarity || null,
+  matchPercent: pythonRes.data.matchPercent || null,
+  perPose: pythonRes.data.perPose || null,
+});
+
   } catch (error) {
     console.error("Face login error:", error.message || error);
     if (error.response && error.response.data) {
@@ -212,19 +237,17 @@ const loginUserWithFace = async (req, res) => {
         error: error.response.data,
       });
     }
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: error.message });
   }
 };
-
-
-
 
 // ✅ ADMIN CONTROLLER
 // controllers/adminController.js
 
 const adminGetAllUserController = async (req, res) => {
   try {
-
     // Fetch all users
     const users = await User.find({}); // get all users
 
@@ -244,13 +267,10 @@ const adminGetAllUserController = async (req, res) => {
   }
 };
 
-
 // ✅ MODERATOR CONTROLLER
 const moderatorAllUsersController = async (req, res) => {
   try {
-
-    
-    const users = await User.find({role: ["user", "moderator"] }); // get all users except admins
+    const users = await User.find({ role: ["user", "moderator"] }); // get all users except admins
 
     res.json({
       success: true,
@@ -268,6 +288,48 @@ const moderatorAllUsersController = async (req, res) => {
   }
 };
 
+// ✅ UPDATE USER ROLE
+const updateUserRole = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    // Check target user
+    const targetUser = await User.findById(id);
+    if (!targetUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Restrict: Admin cannot downgrade another Admin, Moderator cannot update another Moderator/Admin
+    if (req.user.role === "moderator" && targetUser.role !== "user") {
+      return res.status(403).json({ message: "Not authorized to change this user's role" });
+    }
+    if (req.user.role === "admin" && targetUser.role === "admin") {
+      return res.status(403).json({ message: "Cannot change another admin's role" });
+    }
+
+    // Update role
+    targetUser.role = role;
+    await targetUser.save();
+
+    res.json({
+      success: true,
+      message: "User role updated successfully",
+      user: {
+        id: targetUser.id,
+        firstName: targetUser.firstName,
+        lastName: targetUser.lastName,
+        email: targetUser.email,
+        role: targetUser.role,
+      },
+    });
+  } catch (error) {
+    console.error("Error updating user role:", error.message);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
 module.exports = {
   getCurrentUser,
   registerUser,
@@ -276,4 +338,6 @@ module.exports = {
   updateFacePattern,
   adminGetAllUserController,
   moderatorAllUsersController,
+  updateUserRole, // 👈 add this
 };
+

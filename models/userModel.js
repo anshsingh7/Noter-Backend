@@ -48,8 +48,11 @@ const userSchema = new Schema(
       enum: ["user", "admin", "moderator"],
       default: "user",
     },
-    photo: { type: String }, // path or URL to uploaded image
-    faceEncodedData: { type: [Number] },
+    photo: { type: String }, 
+    faceEncodedData: {
+      type: Schema.Types.Mixed,
+      default: {},
+    },
 
     notes: [{ type: Schema.Types.ObjectId, ref: "Note" }],
     tasks: [{ type: Schema.Types.ObjectId, ref: "Task" }],

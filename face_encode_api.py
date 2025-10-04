@@ -27,6 +27,25 @@ embedder = cv2.FaceRecognizerSF.create(
     "face_recognition_sface_2021dec.onnx", ""
 )
 
+def draw_face_mask(frame):
+    h, w = frame.shape[:2]
+    center = (w // 2, h // 2)
+
+    # Face oval
+    axes = (w // 3, h // 3)
+    mask = np.zeros_like(frame, dtype=np.uint8)
+    cv2.ellipse(mask, center, axes, 0, 0, 360, (0, 200, 0), -1)
+
+    # Ears (two circles on each side of oval)
+    ear_radius = 30
+    left_ear = (center[0] - axes[0] - ear_radius // 2, center[1] - 40)
+    right_ear = (center[0] + axes[0] + ear_radius // 2, center[1] - 40)
+    cv2.circle(mask, left_ear, ear_radius, (0, 200, 0), -1)
+    cv2.circle(mask, right_ear, ear_radius, (0, 200, 0), -1)
+
+    # Apply opaque mask (blend 40% transparent)
+    alpha = 0.4
+    frame[:] = cv2.addWeighted(frame, 1, mask, alpha, 0)
 
 def get_face_encoding(frame):
     """Return 1D normalized embedding (list) for the first detected face in frame, else None."""
@@ -85,22 +104,16 @@ def _create_capture_window(name="Face Capture", x=50, y=20):
 
 
 def capture_pose_sequence(poses=("center", "left", "right"), duration_per_pose=3, show_window=True):
-    """
-    Capture embeddings per pose.
-    Returns: (encodings_by_pose: dict, average_encoding: 1D np.array or None)
-    """
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Cannot open camera")
 
+    encodings_by_pose = {}
+    all_embeddings = []
+
     window_name = "Face Capture"
     if show_window:
         _create_capture_window(window_name, x=50, y=20)
-
-    encodings_by_pose = {}
-
-    # mapping for target rotation angle (visual only)
-    pose_to_angle = {"center": 0, "left": -90, "right": 90}
 
     try:
         for pose in poses:
@@ -109,80 +122,49 @@ def capture_pose_sequence(poses=("center", "left", "right"), duration_per_pose=3
 
             direction_text = {
                 "center": "Look straight",
-                "left": "Turn your head LEFT slowly",
-                "right": "Turn your head RIGHT slowly",
+                "left": "Turn LEFT slowly",
+                "right": "Turn RIGHT slowly",
             }.get(pose, "Look straight")
 
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
-
                 elapsed = time.time() - start_time
                 if elapsed > duration_per_pose:
                     break
 
-                # animate angle from 0 -> target
-                start_angle = 0
-                target_angle = pose_to_angle.get(pose, 0)
-                angle = float(np.interp(elapsed, [0, duration_per_pose], [start_angle, target_angle]))
+                # Draw face "shape mask" (see part 2 below 👇)
+                draw_face_mask(frame)
 
-                h, w = frame.shape[:2]
-                center = (w // 2, h // 2)
-                axes = (w // 5, h // 3)
+                cv2.putText(frame, f"Pose: {pose.upper()} - {direction_text}", (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # Draw rotating ellipse mask
-                cv2.ellipse(frame, center, axes, angle, 0, 360, (0, 255, 0), 2)
-
-                # Instruction text
-                cv2.putText(frame, f"Pose: {pose.upper()} ({direction_text})", (20, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-                # Small guidance for user
-                cv2.putText(frame, "Align your face inside the oval", (20, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 200), 1)
-
-                # Attempt to extract encoding for this frame
                 encoding = get_face_encoding(frame)
                 if encoding is not None:
                     embeddings.append(encoding)
-
-                    # show small indicator dot when detected
-                    cv2.circle(frame, (w-30, 30), 8, (0, 255, 0), -1)
+                    all_embeddings.append(encoding)
 
                 if show_window:
                     cv2.imshow(window_name, frame)
-
                 if cv2.waitKey(1) & 0xFF == ord("q"):
-                    # user aborted
                     break
 
-            # End of pose capture
-            if embeddings:
-                encodings_by_pose[pose] = np.mean(np.stack(embeddings, axis=0), axis=0)
-            else:
-                encodings_by_pose[pose] = None
-
-            # short pause between poses
-            time.sleep(0.3)
+            encodings_by_pose[pose] = [e.tolist() for e in embeddings] if embeddings else []
 
     finally:
         cap.release()
         if show_window:
             cv2.destroyAllWindows()
 
-    # compute overall average from all available pose embeddings
-    available = [v for v in encodings_by_pose.values() if v is not None]
+    # ✅ Compute overall embedding from all embeddings
     overall = None
-    if available:
-        overall = np.mean(np.stack(available, axis=0), axis=0)
+    if all_embeddings:
+        overall = np.mean(np.array(all_embeddings, dtype=np.float32), axis=0).tolist()
 
-    # Convert numpy arrays to python lists for JSON serialization at return
-    encodings_by_pose_lists = {}
-    for k, v in encodings_by_pose.items():
-        encodings_by_pose_lists[k] = v.tolist() if v is not None else None
+    return encodings_by_pose, overall
 
-    return encodings_by_pose_lists, (overall.tolist() if overall is not None else None)
+
 
 
 def capture_live_embeddings(duration=4, show_window=True):
@@ -255,6 +237,15 @@ def capture_face():
         show_window = bool(data.get("showWindow", True))
 
         enc_by_pose, overall = capture_pose_sequence(poses=poses, duration_per_pose=duration_per_pose, show_window=show_window)
+        
+        # Pick an "overall" encoding (for backward compatibility)
+        overall = None
+        all_embeddings = []
+        for plist in enc_by_pose.values():
+            all_embeddings.extend(plist)
+        if all_embeddings:
+            # take average embedding across all poses
+            overall = np.mean(np.array(all_embeddings, dtype=np.float32), axis=0).tolist()
 
         if overall is None:
             return jsonify({"success": False, "message": "No face detected during enrollment"}), 400
@@ -273,88 +264,73 @@ def capture_face():
 # -------------------------
 # API: Verify face
 # -------------------------
+def normalize_vector(v):
+    norm = np.linalg.norm(v)
+    if norm == 0:
+        return v
+    return v / norm
+
+def sim(a, b):
+    a_norm = normalize_vector(np.array(a, dtype=np.float32))
+    b_norm = normalize_vector(np.array(b, dtype=np.float32))
+    try:
+        return float(embedder.match(a_norm, b_norm, cv2.FaceRecognizerSF_FR_COSINE))
+    except Exception as e:
+        print("sim error:", e)
+        return 0.0
+
 @app.route("/verify-face", methods=["POST"])
 def verify_face():
-    """
-    Accepts:
-      - either { encoding: [...], threshold: 0.8 }  (legacy / single encoding)
-      - or { encodingsByPose: { center: [...], left: [...], right: [...] }, threshold: 0.8 }
-    Behavior:
-      - Capture live embeddings for a few seconds (default 4s)
-      - If encodingsByPose provided: for each stored pose compute the max similarity against any captured frame
-        then require that ALL stored poses have max similarity >= threshold (i.e. matched all aspects).
-      - If a single encoding provided: compare the average captured embedding to stored encoding.
-    Returns detailed per-pose similarity and overall pass/fail.
-    """
     try:
         data = request.json or {}
-        threshold = float(data.get("threshold", 0.8))
+        threshold = float(data.get("threshold", 0.55))  # lower threshold for more tolerance
 
-        # Accept multiple field names for compatibility
         stored_enc = data.get("encoding") or data.get("faceEncodedData")
         stored_by_pose = data.get("encodingsByPose") or data.get("encodings_by_pose")
-
-        # If stored_by_pose is not present but stored_enc looks like an object with pose keys, accept it
         if not stored_by_pose and isinstance(stored_enc, dict):
             stored_by_pose = stored_enc
             stored_enc = None
-
-        # Ensure we have something
         if stored_by_pose is None and stored_enc is None:
-            return jsonify({"success": False, "message": "Stored encoding or encodingsByPose required"}), 400
+            return jsonify({"success": False, "message": "Stored encoding required"}), 400
 
-        # Capture live embeddings for verification
-        captured_list = capture_live_embeddings(duration=float(data.get("verifyDuration", 4.0)), show_window=bool(data.get("showWindow", True)))
+        captured_list = capture_live_embeddings(duration=float(data.get("verifyDuration", 4.0)), show_window=True)
         if not captured_list:
-            return jsonify({"success": False, "message": "No face detected during verification"}), 400
+            return jsonify({"success": False, "message": "No face detected"}), 400
 
-        # Convert captured embeddings to numpy array list
         captured_np = [np.array(e, dtype=np.float32) for e in captured_list]
-
-        # Helper to compute similarity between two embeddings
-        def sim(a, b):
-            try:
-                return float(embedder.match(np.array(a, dtype=np.float32), np.array(b, dtype=np.float32), cv2.FaceRecognizerSF_FR_COSINE))
-            except Exception as e:
-                print("sim error:", e)
-                return 0.0
 
         if stored_by_pose:
             results = {}
-            max_sims_per_pose = []
-            for pose_name, stored_arr in stored_by_pose.items():
-                if not stored_arr:
-                    results[pose_name] = {"present": False, "maxSimilarity": 0.0, "match": False, "matchPercent": 0.0}
-                    max_sims_per_pose.append(0.0)
+            overall_match = True  # Require all poses to match
+
+            for pose_name, pose_embeddings in stored_by_pose.items():
+                if not pose_embeddings:
+                    results[pose_name] = {"match": False, "matchPercent": 0, "maxSimilarity": 0}
+                    overall_match = False
                     continue
 
-                stored_np = np.array(stored_arr, dtype=np.float32)
-                # compute max similarity between stored pose embedding and any captured embedding
-                sims = [sim(stored_np, c) for c in captured_np]
-                max_sim = max(sims) if sims else 0.0
-                match = max_sim >= threshold
-                results[pose_name] = {
-                    "present": True,
-                    "maxSimilarity": float(max_sim),
-                    "match": bool(match),
-                    "matchPercent": round(max_sim * 100.0, 2)
-                }
-                max_sims_per_pose.append(max_sim)
+                max_sim = 0
+                for stored_arr in pose_embeddings:
+                    stored_np = np.array(stored_arr, dtype=np.float32)
+                    sims = [sim(stored_np, c) for c in captured_np]
+                    if sims:
+                        max_sim = max(max_sim, max(sims))
 
-            # Overall: require all pose matches (the strict "match every aspect" policy)
-            overall_match = bool(len(max_sims_per_pose) > 0 and (min(max_sims_per_pose) >= threshold))
-            overall_percent = round(min(max_sims_per_pose) * 100.0, 2) if max_sims_per_pose else 0.0
+                results[pose_name] = {
+                    "match": max_sim >= threshold,
+                    "matchPercent": round(max_sim * 100, 2),
+                    "maxSimilarity": round(max_sim, 4)
+                }
+                if max_sim < threshold:
+                    overall_match = False
 
             return jsonify({
                 "success": True,
                 "overallMatch": overall_match,
-                "overallMatchPercent": overall_percent,
                 "perPose": results,
                 "capturedFrames": len(captured_np)
             })
-
         else:
-            # legacy single encoding compare to average captured embedding
             stored_np = np.array(stored_enc, dtype=np.float32)
             avg_captured = np.mean(np.stack(captured_np, axis=0), axis=0)
             similarity = sim(stored_np, avg_captured)
@@ -362,13 +338,14 @@ def verify_face():
             return jsonify({
                 "success": True,
                 "match": bool(match),
-                "similarity": float(similarity),
-                "matchPercent": round(similarity * 100.0, 2),
+                "similarity": round(similarity, 4),
+                "matchPercent": round(similarity*100,2),
                 "capturedFrames": len(captured_np)
             })
 
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
 
 
 # -------------------------
